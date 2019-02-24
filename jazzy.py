@@ -2,6 +2,8 @@ import re
 import subprocess
 import sys
 
+debugerr = False
+
 output = ''
 dolnout = False
 ln = 1
@@ -32,7 +34,7 @@ def err(s):
     #s = s.replace(startblock, 'new block')
     #s = s.replace(endblock, 'end block')
     print("Error at line {}: {}".format(ln, s))
-    int('a')
+    if debugerr : int('a')
     sys.exit(0)
 
 def expect(e, f):
