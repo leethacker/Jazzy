@@ -1,0 +1,3 @@
+fact n = i 1 : ?: > n 1 = i * n fact - = i n 1 = i 1 i
+fib n = a 0 : ?: > n 1 + + a fib - n 1 fib - n 1 = a 1 a
+main = : _i fact 5 _i fib 9
