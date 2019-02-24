@@ -2,7 +2,7 @@ import re
 import subprocess
 import sys
 
-debugerr = False
+debugerr = True
 
 output = ''
 dolnout = False
@@ -17,7 +17,8 @@ class function:
         self.args = args
 
 def tokenize(s):
-    r = r'==|!=|<=|>=|%?[a-zA-z]+|[0-9]+|\n(?!\s)|\S'
+    mcs = r'!!|!:|==|!=|<=|>='
+    r = mcs + r'|%?[_a-zA-Z]+|\-?[0-9]+|\n[^\S\n]*|\S'
     result = ['\n'] + re.findall(r, s)[::-1]
     return result    
 
@@ -30,9 +31,16 @@ def outlabel(s):
     output += s + ':\n'
 
 def err(s):
+    global ln
     s = s.replace('\n', 'line break')
     #s = s.replace(startblock, 'new block')
     #s = s.replace(endblock, 'end block')
+    i = -1
+    t = tokens[i]
+    while len(t) > 1 and t[0] == '\n':
+        i -= 1
+        ln += 1
+        t = tokens[i]
     print("Error at line {}: {}".format(ln, s))
     if debugerr : int('a')
     sys.exit(0)
@@ -55,6 +63,9 @@ def getok():
     global ln
     try:
         t = tokens.pop()
+        while len(t) > 1 and t[0] == '\n':
+            ln += 1
+            t = getok()
         if t == '\n':
             ln += 1
             if dolnout:
@@ -66,7 +77,13 @@ def getok():
     except : err("unexpected end of file")
     
 def toptok():
-    try : return tokens[-1]
+    try:
+        i = -1
+        t = tokens[i]
+        while len(t) > 1 and t[0] == '\n':        
+            i -= 1
+            t = tokens[i]
+        return t
     except : err("unexpected end of file")
 
 def isint(s):
@@ -120,6 +137,7 @@ def push(s):
 regs = ['rax', 'rbx', 'rcx', 'rdx', 'rdi', 'rsi', 'rbp', 'r8', 'r9', 'r10', 'r11', 'r12',
         'r13', 'r14']
 retreg = 'r15'
+retvar = '@retvar'
 allregs = regs + [retreg]
 
 opmap = {
@@ -151,8 +169,15 @@ compopinvmap = {
 def doop():
     op = getok()
     var = getvar()
-    val = expr()
-    out('{} {}, {}'.format(opmap[op], varloc(var), varloc(val)))
+    if toptok() == '[':
+        getok()
+        while toptok() != ']':
+            val = expr()
+            out('{} {}, {}'.format(opmap[op], varloc(var), varloc(val)))
+        getok()
+    else:
+        val = expr()
+        out('{} {}, {}'.format(opmap[op], varloc(var), varloc(val)))
     return var
 
 def dowhile():
@@ -229,12 +254,56 @@ def docall():
     if len(vars) > 0 : out('add rsp, {}'.format(len(vars) * 8))
     return '@retvar'
         
+def dolib():
+    getok()
+    s = getid()
+    if s == 'm':
+        e = expr()
+        out('allocmacro {}'.format(varloc(e)))
+    elif s == 'f':
+        e = expr()
+        out('freemacro {}'.format(varloc(e)))
+    return retvar
+    
+def doassign():
+    getok()
+    v = getvar()
+    times = 1
+    off = 0
+    if toptok() == '[':
+        getok()
+        i = expr()
+        if toptok() != ']' : times = expr()
+        if toptok() != ']' : off = expr()
+        match(']')
+    else : i = expr()
+    e = expr()
+    out('mov qword [{} + {} * {} + {}], {}'.format(varloc(v), varloc(i), times, off, varloc(e)))
+    return e
+    
+def doindex():
+    getok()
+    a = getvar()
+    times = 1 
+    off = 0 
+    if toptok() == '[': 
+        getok() 
+        i = expr() 
+        if toptok() != ']' : times = expr()
+        if toptok() != ']' : off = expr()
+        match(']') 
+    else : i = expr()
+    out('mov {}, qword [{} + {} * {} + {}]'.format(retreg, varloc(a), varloc(i), times, off))
+    return retvar
 
 lastret = ''
 def expr():
     if toptok() in opmap.keys() : return doop()
     elif len(toptok()) > 1 and toptok()[0] == '%' : return getok()
     elif toptok() == '?' : return doif()
+    elif toptok() == '@' : return dolib()
+    elif toptok() == '!:' : return doassign()
+    elif toptok() == '!!' : return doindex()
     elif toptok() == '_i' : return doprinti()
     elif toptok() in funcs.keys() : return docall()
     elif isalnum(toptok()) or isint(toptok()) : return getok()
@@ -300,7 +369,12 @@ def findfuncs():
 
 def start(prog):
     global tokens
+    global localvars
+    global output
+    output = ''
+    localvars = {}
     tokens = tokenize(prog)
+    #print(tokens)
     findfuncs()
     while len(tokens) > 1 and toptok() == '\n' : getok()
     while len(tokens) > 1:
