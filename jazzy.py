@@ -15,7 +15,7 @@ class function:
         self.args = args
 
 def tokenize(s):
-    r = r'==|!=|<=|>=|%?[a-zA-z]+|[0-9]+|\n|\S'
+    r = r'==|!=|<=|>=|%?[a-zA-z]+|[0-9]+|\n(?!\s)|\S'
     result = ['\n'] + re.findall(r, s)[::-1]
     return result    
 
