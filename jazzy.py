@@ -264,6 +264,7 @@ def startfunc():
         out('mov {}, {}'.format(reg, val))
     getok()
     while toptok() != '\n' : last = expr()
+    if last == None : err("must return value at end of function")
     if last != '@retvar' : out('mov {}, {}'.format(retreg, varloc(last)))
     out('ret')
             
