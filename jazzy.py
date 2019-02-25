@@ -2,7 +2,7 @@ import re
 import subprocess
 import sys
 
-debugerr = False
+debugerr = True
 
 output = ''
 dolnout = False
@@ -18,7 +18,7 @@ class function:
 
 def tokenize(s):
     mcs = r'!!|!:|==|!=|<=|>='
-    r = mcs + r'|%?[_a-zA-Z]+|\-?[0-9]+|\n[^\S\n]*|\S'
+    r = mcs + r'|[%@]?[_a-zA-Z]+|\-?[0-9]+|\n[^\S\n]*|\S'
     result = ['\n'] + re.findall(r, s)[::-1]
     return result    
 
@@ -94,6 +94,8 @@ def isint(s):
 
 def isalnum(s):
     return not isint(s) and s.replace('_', '').isalnum()
+
+def isalint(s) : return isalnum(s) or isint(s)
 
 localvars = {}
 def useid(s):
@@ -240,6 +242,8 @@ def docall():
     for i in range(len(func.args)):
         arge.append(expr())
     vars = list(localvars.keys())
+    if len(arge) > 1 and arge.count(retvar) > 0:
+        err("expression in function call arguments not saved to register")
     for v in vars:
         push(v)
     for i in range(len(arge)):
@@ -252,11 +256,10 @@ def docall():
     for v in vars:
         stk.pop()
     if len(vars) > 0 : out('add rsp, {}'.format(len(vars) * 8))
-    return '@retvar'
+    return retvar
         
 def dolib():
-    getok()
-    s = getid()
+    s = getok()[1:]
     if s == 'm':
         e = expr()
         out('allocmacro {}'.format(varloc(e)))
@@ -301,7 +304,7 @@ def expr():
     if toptok() in opmap.keys() : return doop()
     elif len(toptok()) > 1 and toptok()[0] == '%' : return getok()
     elif toptok() == '?' : return doif()
-    elif toptok() == '@' : return dolib()
+    elif toptok()[0] == '@' : return dolib()
     elif toptok() == '!:' : return doassign()
     elif toptok() == '!!' : return doindex()
     elif toptok() == '_i' : return doprinti()
@@ -383,6 +386,49 @@ def start(prog):
         while len(tokens) > 1 and toptok() == '\n' : getok()
     return output
     
+def genids(max):
+    
+    from string import ascii_lowercase
+    import itertools
+
+    def iter_all_strings():
+        for size in itertools.count(1):
+            for s in itertools.product(ascii_lowercase, repeat=size):
+                yield "".join(s)
+    
+    result = []
+    i = 0
+    for s in iter_all_strings():
+        result.append(s)
+        i += 1
+        if i >= max : break
+    return result
+        
+    
+def compress(prog):
+    tokens = tokenize(prog)[::-1]
+    
+    ids = []
+    expt = ['main', '_i']
+    for t in tokens:
+        if isalnum(t) and not t in expt and not t in ids:
+            ids.append(t)
+    rids = genids((len(ids) + len(expt)) * 2)
+    for t in expt + ids:
+        if t in rids : rids.remove(t)
+    rep = {ids[i] : rids[i] for i in range(len(ids)) if len(rids[i]) < len(ids[i])}
+        
+    lasttok = ''
+    result = ''
+    for t in tokens:
+        if t in rep.keys() : t = rep[t]
+        if isalnum(t) and isalnum(lasttok) or isint(t) and isint(lasttok):
+            result += ' '
+        if not (len(t) > 1 and t[0] == '\n'):
+            result += t
+        lasttok = t
+    return result
+    
 def main():
     if len(sys.argv) != 2:
         print('wrong number of parameters')
@@ -391,15 +437,19 @@ def main():
        
     output = start(prog)
 
+    comp = compress(prog)
+
     print(prog + '\n')
+    print('Compressed:')
+    print(comp + '\n')
     print(output)
     pl = len(prog)
     ol = len(output)
     print("""
-    program length: {}
-    assembly length: {}
+    program length: {} chars, {} lines
+    assembly length: {}, chars, {} lines
     ratio: {}%
-    """.format(pl, ol, int(float(pl) / float(ol) * 100)))
+    """.format(pl, len(prog.split('\n')), ol, len(output.split('\n')), int(float(pl) / float(ol) * 100)))
 
 if __name__ == "__main__":
     main()
