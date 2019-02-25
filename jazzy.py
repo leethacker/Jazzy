@@ -147,6 +147,9 @@ opmap = {
     '+' : 'add',
     '-' : 'sub',
     '*' : 'imul',
+    '|' : 'or',
+    '&' : 'and',
+    '^' : 'xor',
     '=' : 'mov',
 }
 
@@ -168,6 +171,11 @@ compopinvmap = {
     '!=' : '==',
 }
 
+def varbyreg(r):
+    for v in localvars.keys():
+        if localvars[v] == r : return v
+    return None
+
 def doop():
     op = getok()
     var = getvar()
@@ -182,6 +190,45 @@ def doop():
         out('{} {}, {}'.format(opmap[op], varloc(var), varloc(val)))
     return var
 
+def dodivop():
+    op = getok()
+    var = getvar()
+    val = expr()
+    va = varbyreg('rax')
+    if va : push(va)
+    vc = varbyreg('rcx')
+    if vc : push(vc)
+    vd = varbyreg('rdx')
+    if vd : push(vd)
+    out('mov rax, {}'.format(varloc(var)))
+    out('mov rcx, {}'.format(varloc(val)))
+    out('xor rdx, rdx')
+    out('idiv rcx')
+    om = {'/' : 'rax', '%' : 'rdx'}
+    out('mov {}, {}'.format(localvars[var], om[op]))
+    l = [va, vc, vd]
+    i = 0
+    for v in l:
+        if v:
+            stk.pop()
+            i += 1
+            r = localvars[v]
+            if r != localvars[var]:
+                out('mov {}, {}'.format(r, varloc(v)))
+    out('add rsp, {}'.format(i * 8))
+    return var
+    """
+    if toptok() == '[':
+        getok()
+        while toptok() != ']':
+            val = expr()
+            out('{} {}, {}'.format(opmap[op], varloc(var), varloc(val)))
+        getok()
+    else:
+        val = expr()
+        out('{} {}, {}'.format(opmap[op], varloc(var), varloc(val)))
+    """
+    
 def dowhile():
     loop = newname('loop')
     exit = newname('exit')
@@ -302,6 +349,7 @@ def doindex():
 lastret = ''
 def expr():
     if toptok() in opmap.keys() : return doop()
+    elif toptok() in ['/', '%'] : return dodivop()
     elif len(toptok()) > 1 and toptok()[0] == '%' : return getok()
     elif toptok() == '?' : return doif()
     elif toptok()[0] == '@' : return dolib()
@@ -374,8 +422,10 @@ def start(prog):
     global tokens
     global localvars
     global output
+    global stk
     output = ''
     localvars = {}
+    stk = []
     tokens = tokenize(prog)
     #print(tokens)
     findfuncs()
