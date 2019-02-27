@@ -17,7 +17,8 @@ class function:
         self.args = args
 
 def tokenize(s):
-    mcs = r'!!|!:|==|!=|<=|>='
+    s = re.sub(r'#.*\n', '\n', s)
+    mcs = r'::|<<|>>|!!|!:|==|!=|<=|>='
     r = mcs + r'|[%@]?[_a-zA-Z]+|\-?[0-9]+|\n[^\S\n]*|\S'
     result = ['\n'] + re.findall(r, s)[::-1]
     return result    
@@ -120,6 +121,12 @@ def getvar():
     if not s in localvars.keys() : expect('var', s)
     return s
 
+def getreg():
+    s = expr() 
+    if len(s) > 1 and s[0] == '%' : return s
+    if not s in localvars.keys() and not s == retvar : expect('var', s)
+    return s
+
 def varloc(s):
     if len(s) > 1 and s[0] == '%':
         r = s[1:]
@@ -150,7 +157,10 @@ opmap = {
     '|' : 'or',
     '&' : 'and',
     '^' : 'xor',
+    '<<' : 'shl',
+    '>>' : 'shr',
     '=' : 'mov',
+    '::' : 'mov',
 }
 
 compopmap = {
@@ -178,7 +188,13 @@ def varbyreg(r):
 
 def doop():
     op = getok()
-    var = getvar()
+    if toptok() == '[':
+        getok()
+        var = getvar()
+        match(']')
+        src = expr()
+        out('mov {}, {}'.format(varloc(var), varloc(src)))
+    else : var = getvar()
     if toptok() == '[':
         getok()
         while toptok() != ']':
@@ -210,11 +226,11 @@ def dodivop():
     i = 0
     for v in l:
         if v:
-            stk.pop()
             i += 1
             r = localvars[v]
             if r != localvars[var]:
                 out('mov {}, {}'.format(r, varloc(v)))
+    for a in range(i) : stk.pop()
     out('add rsp, {}'.format(i * 8))
     return var
     """
@@ -233,20 +249,43 @@ def dowhile():
     loop = newname('loop')
     exit = newname('exit')
     getok()
-    op = getok()
-    if not op in compopmap.keys() : expect('comparison operator', op)
-    invop = compopinvmap[op]
-    var = getvar()
-    val = getok()
-    cmp = 'cmp {}, {}'.format(varloc(var), varloc(val))
-    jmp = '{} {}'.format(compopmap[invop], exit)
-    out(cmp)
-    out(jmp)
-    outlabel(loop)
-    expr()
-    out(cmp)
-    out('{} {}'.format(compopmap[op], loop))
-    outlabel(exit)
+    if toptok() == '[':
+        getok()
+        var = getvar()
+        max = None
+        min = None
+        inc = '1'
+        max = expr()
+        if toptok() != ']':
+            min = max
+            max = expr()
+            if toptok() != ']':
+                inc = expr()
+        match(']')
+        if min != None : out('mov {}, {}'.format(varloc(var), varloc(min)))
+        out('cmp {}, {}'.format(varloc(var), varloc(max)))
+        out('jge {}'.format(exit))
+        outlabel(loop)
+        expr()
+        out('add {}, {}'.format(varloc(var), varloc(inc)))
+        out('cmp {}, {}'.format(varloc(var), varloc(max)))
+        out('jl {}'.format(loop))
+        outlabel(exit)
+    else:
+        op = getok()
+        if not op in compopmap.keys() : expect('comparison operator', op)
+        invop = compopinvmap[op]
+        var = getreg()
+        val = getok()
+        cmp = 'cmp {}, {}'.format(varloc(var), varloc(val))
+        jmp = '{} {}'.format(compopmap[invop], exit)
+        out(cmp)
+        out(jmp)
+        outlabel(loop)
+        expr()
+        out(cmp)
+        out('{} {}'.format(compopmap[op], loop))
+        outlabel(exit)
     return None
 
 def doif():
@@ -261,7 +300,7 @@ def doif():
     op = getok()
     if not op in compopmap.keys() : expect('comparison operator', op)
     invop = compopinvmap[op]
-    var = getvar()
+    var = getreg()
     val = getok()
     cmp = 'cmp {}, {}'.format(varloc(var), varloc(val))
     jmp = '{} {}'.format(compopmap[invop], elsel)
@@ -313,6 +352,8 @@ def dolib():
     elif s == 'f':
         e = expr()
         out('freemacro {}'.format(varloc(e)))
+    elif s == 'ret':
+        doret()
     return retvar
     
 def doassign():
@@ -328,7 +369,9 @@ def doassign():
         match(']')
     else : i = expr()
     e = expr()
-    out('mov qword [{} + {} * {} + {}], {}'.format(varloc(v), varloc(i), times, off, varloc(e)))
+    try:
+        out('mov qword [{} + {} * {} + {}], {}'.format(varloc(v), varloc(i), times, off, varloc(e)))
+    except : err('array assignment error')
     return e
     
 def doindex():
@@ -346,7 +389,12 @@ def doindex():
     out('mov {}, qword [{} + {} * {} + {}]'.format(retreg, varloc(a), varloc(i), times, off))
     return retvar
 
-lastret = ''
+def doret():
+    e = expr()
+    if not e == retvar : out('mov {}, {}'.format(retreg, varloc(e)))
+    out('ret')
+    return None
+
 def expr():
     if toptok() in opmap.keys() : return doop()
     elif toptok() in ['/', '%'] : return dodivop()
@@ -372,14 +420,17 @@ def startfunc():
     localvars = {}
     rs = regs[::-1]
     args = []
+    tmvars = lambda : err("too many arguments/variables")
     while toptok() != '=':
         name = getid()
+        if len(rs) == 0 : tmvars()
         reg = rs.pop()
         localvars[name] = reg
         args.append(name)
     getok()
     while toptok() != ':':
         name = getid()
+        if len(rs) == 0 : tmvars()
         reg = rs.pop()
         localvars[name] = reg
         val = getint()
