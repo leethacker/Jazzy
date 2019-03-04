@@ -19,7 +19,7 @@ class function:
 def tokenize(s):
     s = re.sub(r'#.*\n', '\n', s)
     mcs = r'>>=|\\<|\.\.\.|\\>|::|<<|>>|!!|!:|==|!=|<=|>='
-    r = mcs + r'|"[^"]*"|(?<=\{)[^\}]*|[@]?[_a-zA-Z]+|\-?[0-9]+|%[_a-zA-Z0-9]+|\n[^\S\n]*|\S'
+    r = mcs + r'|"[^"]*"|\{[^\}]*}|[@]?[_a-zA-Z]+|\-?[0-9]+|%[_a-zA-Z0-9]+|\n[^\S\n]*|\S'
     result = ['\n'] + re.findall(r, s)[::-1]
     return result    
 
@@ -449,12 +449,8 @@ def doret():
 
 def doasm():
     getok()
-    match('{')
     t = getok()
-    s = ''
-    while t != '}':
-        s += t + ' '
-        t = getok()
+    s = t[1:-1]
     out(s)
     
 def dofp():
@@ -609,7 +605,8 @@ def startfunc():
     out('ret')
             
 def startline():
-    startfunc()
+    if toptok() == '$' : doasm()
+    else : startfunc()
     
 def findfuncs():
     global tokens
@@ -617,20 +614,24 @@ def findfuncs():
     oldtokens = tokens[:]
     while toptok() == '\n' : getok()
     while len(tokens) > 1:
-        fname = getid()
-        args = []
-        locals = []
-        while toptok() != '=':
-            name = getid()
-            args.append(name)
-        getok()
-        while toptok() != ':':
-            name = getid()
-            val = getint()
-            locals.append(name)
-        getok()
-        #if isint(toptok()) : args.pop()
-        funcs[fname] = function(fname, args)
+        if toptok() == '$':
+            getok()
+            getok()
+        else:
+            fname = getid()
+            args = []
+            locals = []
+            while toptok() != '=':
+                name = getid()
+                args.append(name)
+            getok()
+            while toptok() != ':':
+                name = getid()
+                val = getint()
+                locals.append(name)
+            getok()
+            #if isint(toptok()) : args.pop()
+            funcs[fname] = function(fname, args)
         while toptok() != '\n' : getok()
         while toptok() == '\n' and len(tokens) > 1 : getok()
     tokens = oldtokens
