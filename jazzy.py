@@ -18,8 +18,8 @@ class function:
 
 def tokenize(s):
     s = re.sub(r'#.*\n', '\n', s)
-    mcs = r'>>=|\\<|\.\.\.|\\>|::|<<|>>|!!|!:|==|!=|<=|>='
-    r = mcs + r'|"[^"]*"|\{[^\}]*}|[@]?[_a-zA-Z]+|\-?[0-9]+|%[_a-zA-Z0-9]+|\n[^\S\n]*|\S'
+    mcs = r'>\||<\||>>=|\\<|\.\.\.|\\>|::|<<|>>|!!|!:|==|!=|<=|>='
+    r = mcs + r'|\'[^\']\'|"[^"]*"|\{[^\}]*}|[@]?[_a-zA-Z]+|\-?[0-9]+|%[_a-zA-Z0-9]+|\n[^\S\n]*|\S'
     result = ['\n'] + re.findall(r, s)[::-1]
     return result    
 
@@ -129,7 +129,8 @@ def getreg():
 
 def varloc(s):
     if s == None : err('not a valid value')
-    if len(s) > 1 and s[0] == '%':
+    if s[0] == "'" : return ord(s[1:-1])
+    elif len(s) > 1 and s[0] == '%':
         r = s[1:]
         if not r in allregs : err("no such register ''".format(r))
         return r
@@ -186,6 +187,11 @@ def varbyreg(r):
     for v in localvars.keys():
         if localvars[v] == r : return v
     return None
+    
+def regbyvar(v):
+    if v in localvars.keys() : return localvars[v]
+    elif v[1:] in allregs : return v[1:]
+    else : err("no variable '{}' in registers".format(v))
 
 def doop():
     op = getok()
@@ -228,14 +234,14 @@ def dodivop():
     out('xor rdx, rdx')
     out('idiv rcx')
     om = {'/' : 'rax', '%' : 'rdx'}
-    out('mov {}, {}'.format(localvars[var], om[op]))
+    out('mov {}, {}'.format(regbyvar(var), om[op]))
     l = [va, vc, vd]
     i = 0
     for v in l:
         if v:
             i += 1
             r = localvars[v]
-            if r != localvars[var]:
+            if r != regbyvar(var):
                 out('mov {}, {}'.format(r, varloc(v)))
     for a in range(i) : stk.pop()
     out('add rsp, {}'.format(i * 8))
@@ -397,6 +403,38 @@ def domalloc():
         out('allocmacro {}'.format(varloc(e)))
     return retvar
 
+def dofold():
+    f = getreg()
+    start = expr()
+    l = getreg()
+    max = expr()
+    if [f, start, l, max].count(retvar) > 1 : err('return register used more than once in args')
+    for i in range(len(localvars)) : store(regs[i])
+    usedregs = ['rax', 'rbx', 'rcx', 'rdx', 'rdi']
+    out('mov rax, {}'.format(varloc(start)))
+    out('mov rbx, {}'.format(varloc(l)))
+    out('mov rcx, {}'.format(varloc(max)))
+    out('mov rdx, {}'.format(varloc(f)))
+    out('mov rdi, 0')
+    loop = newname('loop')
+    exit = newname('exit')
+    out('cmp rdi, rcx')
+    out('jge {}'.format(exit))
+    outlabel(loop)
+    for r in usedregs : out('push {}'.format(r))
+    out('mov rbx, [rbx + rdi * 8]')
+    out('call rdx')
+    for r in usedregs[::-1] : out('pop {}'.format(r))
+    out('mov rax, {}'.format(retreg))
+    out('add rdi, 1')
+    out('cmp rdi, rcx')
+    out('jl {}'.format(loop))
+    outlabel(exit)
+    out('mov {}, rax'.format(retreg))
+    
+    for i in range(len(localvars)) : out('pop {}'.format(regs[len(localvars) - i - 1]))
+    for i in range(len(localvars)) : stk.pop()
+
 def dolib():
     s = getok()[1:]
     if s == 'm':
@@ -406,6 +444,8 @@ def dolib():
         out('freemacro {}'.format(varloc(e)))
     elif s == 'ret':
         doret()
+    elif s == 'fold':
+        dofold()
     return retvar
     
 def doassign():
@@ -438,20 +478,29 @@ def doindex():
         if toptok() != ']' : off = expr()
         match(']') 
     else : i = expr()
+    #out('mov {}, 0'.format(retreg))
     out('mov {}, qword [{} + {} * {} + {}]'.format(retreg, varloc(a), varloc(i), times, off))
     return retvar
 
 def doret():
     e = expr()
     if not e == retvar : out('mov {}, {}'.format(retreg, varloc(e)))
+    if len(stk) > 0 : out('add rsp, {}'.format(len(stk) * 8))
     out('ret')
     return None
 
 def doasm():
     getok()
     t = getok()
-    s = t[1:-1]
-    out(s)
+    if len(t) > 2 and t[0] == '{':
+        s = t[1:-1]
+        out(s)
+    else:
+        s = t + ' '
+        while tokens[-1][0] != '\n':
+            t = getok()
+            s += t + ' '
+        out(s)
     
 def dofp():
     getok()
@@ -506,21 +555,21 @@ def doanonfunc():
     getok()
     if last == None : err("must return value at end of function")
     if last != '@retvar' : out('mov {}, {}'.format(retreg, varloc(last)))
+    if len(stk) > 0 : out('add rsp, {}'.format(len(stk) * 8))
     out('ret')
     outlabel(skip)
     out('mov {}, {}'.format(retreg, fname))
     localvars = oldvars
     stk = oldstk
     return retvar
+    
+def store(r):
+    if r in localvars.values() : push(varbyreg(r))
+    else:
+        out('push {}'.format(r))
+        stk.append(None) 
 
-def domonad():
-    
-    def store(r):
-        if r in localvars.values() : push(varbyreg(r))
-        else:
-            out('push {}'.format(r))
-            stk.append(None) 
-    
+def domonad():    
     getok()
     src = getvar()
     func = expr()
@@ -552,10 +601,21 @@ def domonad():
     for i in range(len(localvars)) : stk.pop()
     return retvar
 
+def dopush():
+    getok()
+    push(expr())
+    
+def dopop():
+    getok()
+    out('pop {}'.format(retreg))
+    stk.pop()
+    return retvar
+
 def expr():
     if toptok() in opmap.keys() : return doop()
     elif toptok() in ['/', '%'] : return dodivop()
     elif len(toptok()) > 1 and toptok()[0] == '%' : return getok()
+    elif toptok()[0] == "'" : return getok()
     elif toptok() == '?' : return doif()
     elif toptok()[0] == '@' : return dolib()
     elif toptok() == '!:' : return doassign()
@@ -565,7 +625,10 @@ def expr():
     elif toptok() == '\\>' : return dodfp()
     #elif toptok() == '\\<' : return doanonfunc()
     elif toptok() == '>>=' : return domonad()
+    elif toptok() == '>|' : return dopush()
+    elif toptok() == '<|' : return dopop()
     elif toptok() == '_i' : return doprinti()
+    elif toptok() == '@noret' : return getok()
     elif toptok() in funcs.keys() : return docall()
     elif isalnum(toptok()) or isint(toptok()) : return getok()
     elif toptok() == '(':
@@ -578,6 +641,8 @@ def expr():
 
 def startfunc():
     global localvars
+    global stk
+    stk = []
     funcname = getid()
     outlabel('{}{}'.format(funcpref, funcname))
     localvars = {}
@@ -599,9 +664,12 @@ def startfunc():
         val = getint()
         out('mov {}, {}'.format(reg, val))
     getok()
+    last = None
     while toptok() != '\n' : last = expr()
     if last == None : err("must return value at end of function")
-    if last != '@retvar' : out('mov {}, {}'.format(retreg, varloc(last)))
+    elif last == '@noret' : pass 
+    elif last != '@retvar' : out('mov {}, {}'.format(retreg, varloc(last)))
+    if len(stk) > 0 : out('add rsp, {}'.format(len(stk) * 8))
     out('ret')
             
 def startline():
