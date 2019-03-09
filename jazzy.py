@@ -435,6 +435,23 @@ def dofold():
     for i in range(len(localvars)) : out('pop {}'.format(regs[len(localvars) - i - 1]))
     for i in range(len(localvars)) : stk.pop()
 
+def dorange():
+    max = expr()
+    push(varbyreg('rax'))
+    out('mov rax, {}'.format(varloc(max)))
+    out('imul rax, 8')
+    out('allocmacro rax')
+    out('mov rax, 0')
+    loop = newname('loop')
+    outlabel(loop)
+    out('mov [{} + rax * 8], rax'.format(retreg))
+    out('add rax, 1')
+    out('cmp rax, {}'.format(varloc(max)))
+    out('jl {}'.format(loop))
+    out('pop rax')
+    stk.pop()
+    return retvar
+
 def dolib():
     s = getok()[1:]
     if s == 'm':
@@ -446,6 +463,8 @@ def dolib():
         doret()
     elif s == 'fold':
         dofold()
+    elif s == 'range':
+        dorange()
     return retvar
     
 def doassign():
