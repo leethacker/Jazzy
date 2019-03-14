@@ -346,7 +346,7 @@ def doif():
     if not op in compopmap.keys() : expect('comparison operator', op)
     invop = compopinvmap[op]
     var = getreg()
-    val = getok()
+    val = expr()
     cmp = 'cmp {}, {}'.format(varloc(var), varloc(val))
     jmp = '{} {}'.format(compopmap[invop], elsel)
     out(cmp)
@@ -669,6 +669,30 @@ def dopop():
     stk.pop()
     return retvar
 
+def doprintstr():
+    getok()
+    e = expr()
+    out('printstrmacro {}'.format(varloc(e)))
+    return e
+    
+def doprintstrln():
+    getok()
+    e = expr()
+    out('printstrlnmacro {}'.format(varloc(e)))
+    return e
+    
+def doprintiln(): 
+    getok() 
+    e = expr() 
+    out('printintlnmacro {}'.format(varloc(e)))
+    return e
+
+def doprintchar():  
+    getok()  
+    e = expr()  
+    out('printcharmacro {}'.format(varloc(e)))
+    return e
+
 def expr():
     if toptok() in opmap.keys() : return doop()
     elif toptok() in ['/', '%'] : return dodivop()
@@ -686,6 +710,10 @@ def expr():
     elif toptok() == '>|' : return dopush()
     elif toptok() == '<|' : return dopop()
     elif toptok() == '_i' : return doprinti()
+    elif toptok() == '_il' : return doprintiln()
+    elif toptok() == '_s' : return doprintstr()
+    elif toptok() == '_sl' : return doprintstrln()
+    elif toptok() == '_c' : return doprintchar()
     elif toptok() == '@noret' : return getok()
     elif toptok() in funcs.keys() : return docall()
     elif isalnum(toptok()) or isint(toptok()) : return getok()
@@ -776,16 +804,104 @@ def findfuncs():
     tokens = oldtokens
     ln = 1
 
+class macro:
+    def __init__(self, args, tokens):
+        self.args = args
+        self.tokens = tokens
+
+def findmacros(toks):
+    global tokens
+    global ln
+    macros = {}
+    tokens = toks
+    ntoks = []
+    while toptok() == '\n' : getok()
+    while len(tokens) > 1:
+        if toptok() == '$':
+            ntoks.append(getok())
+            ntoks.append(getok())
+        elif toptok()[0] == '@':
+            t = getok()
+            ntoks.append(t)
+            while t != '\n':
+                t = getok()
+                ntoks.append(t)
+        else:
+            fname = getok()
+            args = []
+            locals = []
+            while toptok() != '=' and toptok() != '~':
+                name = getid()
+                args.append(name)
+            if toptok() == '~':
+                getok()
+                mtokens = []
+                while toptok() != '\n' : mtokens.append(getok())
+                macros[fname] = macro(args, mtokens)
+            else:
+                ntoks.append(fname)
+                for a in args : ntok.append(a)
+                while toptok() != '\n' : ntoks.append(getok())
+        while toptok() == '\n' and len(tokens) > 1 : ntoks.append(getok())    
+    return ntoks, macros
+
+def common_member(a, b): 
+    a_set = set(a) 
+    b_set = set(b) 
+    if (a_set & b_set): 
+        return True 
+    else: 
+        return False
+
+def domacros(prog):
+    global tokens
+    tokens = ['\n'] + tokenize(prog)
+    tokens, macros = findmacros(tokens)
+    for i in range(30):
+        tokens = domacroreplace(tokens, macros)
+        if not common_member(tokens, macros.keys()) : break        
+    if common_member(tokens, macros.keys()):
+        culprit = None
+        for m in macros.keys():
+            if m in tokens:
+                culprit = m
+                break
+        global ln
+        ln = 0
+        err("macro '{}' recursion overflow".format(culprit))
+    return ['\n'] + tokens[::-1]
+    
+def domacroreplace(toks, macros):
+    global tokens
+    tokens = toks[::-1]
+    ntoks = []
+    while len(tokens) > 1:
+        t = getok()
+        if t in macros.keys():
+            m = macros[t]
+            argmap = {}
+            for a in m.args:
+                argmap[a] = getok()
+            for tok in m.tokens:
+                if tok in argmap.keys():
+                    ntoks.append(argmap[tok])
+                else : ntoks.append(tok)
+        else : ntoks.append(t)
+    return ntoks + ['\n']
+
 def start(prog):
     global tokens
     global localvars
     global output
     global stk
+    global ln
     output = ''
     localvars = {}
     stk = []
-    tokens = tokenize(prog)
+    tokens = domacros(prog)
+    #tokens = tokenize(prog)
     #print(tokens)
+    ln = 1
     findfuncs()
     while len(tokens) > 1 and toptok() == '\n' : getok()
     while len(tokens) > 1:
