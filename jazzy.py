@@ -2,7 +2,7 @@ import re
 import subprocess
 import sys
 
-debugerr = True
+debugerr = False
 
 output = ''
 dataoutput = ''
