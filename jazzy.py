@@ -5,10 +5,13 @@ import sys
 debugerr = False
 
 output = ''
+dataoutput = ''
 dolnout = False
 ln = 1
 funcpref = 'func_'
 stk = []
+globalvars = {}
+globalarrays = {}
 
 funcs = {}
 class function:
@@ -18,9 +21,10 @@ class function:
 
 def tokenize(s):
     s = re.sub(r'#.*\n', '\n', s)
-    mcs = r'>\||<\||>>=|\\<|\.\.\.|\\>|::|<<|>>|!!|!:|==|!=|<=|>='
-    r = mcs + r'|\'[^\']\'|"[^"]*"|\{[^\}]*}|[@`]?[_a-zA-Z]+|\-?[0-9]+|%[_a-zA-Z0-9]+|\n[^\S\n]*|\S'
+    mcs = r';;|\*\*|\^/|%32|\*~|>\||<\||>>=|\\<|\.\.\.|\\>|::|<<|>>|!!|!:|==|!=|<=|>='
+    r = mcs + r'|`[a-zA-Z0-9_]+|\'[^\']\'|"[^"]*"|\$ *\{[^\}]*}|\$[^\n]*|[@`]?[_a-zA-Z]+|\-?[0-9]+|%[_a-zA-Z0-9]+|\n[^\S\n]*|\S'
     result = ['\n'] + re.findall(r, s)[::-1]
+    result = [s if s[0] != '`' else s[1:] for s in result]
     return result    
 
 def out(s):
@@ -60,11 +64,11 @@ def newname(s):
     namei += 1
     return result
 
-def getok():
+def getok(raw = False):
     global ln
     try:
         t = tokens.pop()
-        while len(t) > 1 and t[0] == '\n':
+        while not raw and len(t) > 1 and t[0] == '\n':
             ln += 1
             t = getok()
         if t == '\n':
@@ -76,6 +80,9 @@ def getok():
             #out("incrline")
         return t
     except : err("unexpected end of file")
+
+def getokraw():
+    return getok(raw=True)
     
 def toptok():
     try:
@@ -112,6 +119,7 @@ def getid():
     
 def getint():
     s = getok()
+    if s[0] == "'" : return str(ord(s[1:-1]))
     if not isint(s) : expect('int', s)
     return s
 
@@ -132,7 +140,7 @@ def varloc(s):
     if s[0] == "'" : return ord(s[1:-1])
     elif len(s) > 1 and s[0] == '%':
         r = s[1:]
-        if not r in allregs : err("no such register ''".format(r))
+        if not r in completereglist : err("no such register ''".format(r))
         return r
     elif s in stk : return 'qword [rsp + {}]'.format(stk[::-1].index(s) * 8)
     elif s in localvars.keys() : return localvars[s]
@@ -157,6 +165,9 @@ retreg16 = 'bp'
 
 retvar = '@retvar'
 
+def getallregs():
+    return regs + [retreg, 'rsp']
+
 def setmode(b):
     global regs
     global retreg
@@ -174,7 +185,16 @@ def setmode(b):
         regs = regs16
         retreg = retreg16
         rsize = 2
-    allregs = regs + [retreg, 'rsp']
+    allregs = getallregs()
+
+completereglist = []
+setmode(16)
+completereglist += allregs
+setmode(32)
+completereglist += allregs
+setmode(64)
+completereglist += allregs
+completereglist = list(set(completereglist))
 
 setmode(64)
 
@@ -190,6 +210,7 @@ opmap = {
     '>>' : 'shr',
     '=' : 'mov',
     '::' : 'mov',
+    '**' : 'powmacro'
 }
 
 compopmap = {
@@ -232,11 +253,13 @@ def doop():
     if toptok() == '[':
         getok()
         while toptok() != ']':
-            val = expr()
+            if op in ['<<', '>>'] : val = getint()
+            else : val = expr()
             out('{} {}, {}'.format(opmap[op], varloc(var), varloc(val)))
         getok()
     else:
-        val = expr()
+        if op in ['<<', '>>'] : val = getint()
+        else : val = expr()
         out('{} {}, {}'.format(opmap[op], varloc(var), varloc(val)))
     return var
 
@@ -259,8 +282,9 @@ def dodivop():
     out('mov rax, {}'.format(varloc(var)))
     out('mov rcx, {}'.format(varloc(val)))
     out('xor rdx, rdx')
-    out('idiv rcx')
-    om = {'/' : 'rax', '%' : 'rdx'}
+    if op == '%32' : out('idiv ecx')
+    else : out('idiv rcx')
+    om = {'/' : 'rax', '%' : 'rdx', '%32' : 'rdx'}
     out('mov {}, {}'.format(regbyvar(var), om[op]))
     l = [va, vc, vd]
     i = 0
@@ -316,12 +340,17 @@ def dowhile():
         outlabel(loop)
         expr()
         out('jmp {}'.format(loop))
-    else:
-        op = getok()
-        if not op in compopmap.keys() : expect('comparison operator', op)
+    else: 
+        if toptok() in compopmap.keys():
+            op = getok()
+            #if not op in compopmap.keys() : expect('comparison operator', op)
+            var = getreg()
+            val = getok()
+        else:
+            op = '!='
+            var = getreg()
+            val = '0'
         invop = compopinvmap[op]
-        var = getreg()
-        val = getok()
         cmp = 'cmp {}, {}'.format(varloc(var), varloc(val))
         jmp = '{} {}'.format(compopmap[invop], exit)
         out(cmp)
@@ -342,11 +371,16 @@ def doif():
     elif toptok() == ':':
         iselse = True
         getok()
-    op = getok()
-    if not op in compopmap.keys() : expect('comparison operator', op)
+    if toptok() in compopmap.keys():
+        op = getok()
+        #if not op in compopmap.keys() : expect('comparison operator', op)
+        var = getreg()
+        val = expr()
+    else:
+        op = '!='
+        var = getreg()
+        val = '0'
     invop = compopinvmap[op]
-    var = getreg()
-    val = getok()
     cmp = 'cmp {}, {}'.format(varloc(var), varloc(val))
     jmp = '{} {}'.format(compopmap[invop], elsel)
     out(cmp)
@@ -376,7 +410,8 @@ def docall():
 
 def docallwithargs(fname, arge):
     vars = list(localvars.keys())
-    if len(arge) > 1 and arge.count(retvar) > 0:
+    #if len(arge) > 1 and arge.count(retvar) > 0:
+    if arge.count(retvar) > 1:
         err("expression in function call arguments not saved to register")
     for v in vars:
         push(v)
@@ -392,15 +427,17 @@ def docallwithargs(fname, arge):
     if len(vars) > 0 : out('add rsp, {}'.format(len(vars) * 8))
     return retvar
 
+tmap = {
+    1 : 'byte',
+    2 : 'word',
+    4 : 'dword',
+    8 : 'qword',
+}
+
 def domalloc():
     if toptok() == '[':
         getok()
-        tmap = {
-            1 : 'byte',
-            2 : 'word',
-            4 : 'dword',
-            8 : 'qword',
-        }
+        
         size = int(getint())
         if not size in tmap:
             err('bad size for mem allocation')
@@ -502,6 +539,8 @@ def dolib():
         doret()
     elif s == 'fold':
         dofold()
+    elif s == 'zip':
+        dozip()
     elif s == 'range':
         dorange()
     return retvar
@@ -509,7 +548,7 @@ def dolib():
 def doassign():
     getok()
     v = getvar()
-    times = 1
+    times = rsize
     off = 0
     if toptok() == '[':
         getok()
@@ -518,16 +557,34 @@ def doassign():
         if toptok() != ']' : off = expr()
         match(']')
     else : i = expr()
+    times = int(times)
+    if not times in tmap.keys() : err("bad memory size '{}'".format(times))
     e = expr()
     try:
-        out('mov qword [{} + {} * {} + {}], {}'.format(varloc(v), varloc(i), times, off, varloc(e)))
+        push(varbyreg('rax'))
+        push(varbyreg('rbx'))
+        push(varbyreg('rcx'))
+        out('mov rax, {}'.format(varloc(e)))
+        out('mov rbx, {}'.format(varloc(v)))
+        out('mov rcx, {}'.format(varloc(i)))
+        if times == 8 : r = 'rax'
+        elif times == 4 : r = 'eax'
+        elif times == 1 : r = 'al'
+        elif times == 2:
+            out('shl rax, 16')
+            r = 'ax'
+        out('mov {} [rbx + rcx * {} + {}], {}'.format(tmap[times], times, off, r))
+        out('pop rcx')
+        out('pop rbx')
+        out('pop rax')
+        for i in range(3) : stk.pop()
     except : err('array assignment error')
     return e
     
 def doindex():
     getok()
     a = getvar()
-    times = 1 
+    times = rsize
     off = 0 
     if toptok() == '[': 
         getok() 
@@ -536,8 +593,11 @@ def doindex():
         if toptok() != ']' : off = expr()
         match(']') 
     else : i = expr()
+    times = int(times)
+    if not times in tmap.keys() : err("bad memory size '{}'".format(times))
     #out('mov {}, 0'.format(retreg))
-    out('mov {}, qword [{} + {} * {} + {}]'.format(retreg, varloc(a), varloc(i), times, off))
+    out('mov {}, [{} + {} * {} + {}]'.format(retreg, varloc(a), varloc(i), times, off))
+    if times < 8 : out('and {}, {}'.format(retreg, '0x' + 'ff' * times))
     return retvar
 
 def doret():
@@ -548,17 +608,11 @@ def doret():
     return None
 
 def doasm():
-    getok()
     t = getok()
-    if len(t) > 2 and t[0] == '{':
-        s = t[1:-1]
-        out(s)
-    else:
-        s = t + ' '
-        while tokens[-1][0] != '\n':
-            t = getok()
-            s += t + ' '
-        out(s)
+    t = t[1:]
+    while t[0] == ' ' : t = t[1:]
+    if t[0] == '{' : t = t[1:-1]
+    out(t)
     
 def dofp():
     getok()
@@ -659,6 +713,41 @@ def domonad():
     for i in range(len(localvars)) : stk.pop()
     return retvar
 
+def dozip():    
+    #getok()
+    #src = getvar()
+    func = expr()
+    srca = getvar()
+    srcb = getvar()
+    length = expr()
+    usedregs = ['rax', 'rbx', 'rcx', 'rdx', 'rdi', 'rsi', 'rbp']
+    for i in range(len(localvars)) : store(regs[i])
+    out('mov rax, {}'.format(varloc(srca)))
+    out('mov rbp, {}'.format(varloc(srcb)))
+    out('mov rsi, {}'.format(varloc(func)))
+    out('mov rcx, {}'.format(0))
+    out('mov rdx, {}'.format(varloc(length)))
+    out('mov r15, rdx')
+    out('imul r15, 8')
+    out('allocmacro r15')
+    out('mov rdi, r15')
+    loop = newname('loop')
+    outlabel(loop)
+    for r in usedregs : out('push {}'.format(r))
+    #docallwithargs('rbx', ['%rsi'])
+    out('mov rax, qword [rax + rcx * 8]')
+    out('mov rbx, qword [rbp + rcx * 8]')
+    out('call rsi')
+    for r in usedregs[::-1] : out('pop {}'.format(r))
+    out('mov qword [rdi + rcx * 8], {}'.format(retreg))
+    out('add rcx, 1')
+    out('cmp rcx, rdx')
+    out('jl {}'.format(loop))
+    out('mov {}, rdi'.format(retreg))
+    for i in range(len(localvars)) : out('pop {}'.format(regs[len(localvars) - i - 1]))
+    for i in range(len(localvars)) : stk.pop()
+    return retvar
+
 def dopush():
     getok()
     push(expr())
@@ -669,24 +758,161 @@ def dopop():
     stk.pop()
     return retvar
 
+def doprintstr():
+    getok()
+    e = expr()
+    out('printstrmacro {}'.format(varloc(e)))
+    return e
+    
+def doprintstrln():
+    getok()
+    e = expr()
+    out('printstrlnmacro {}'.format(varloc(e)))
+    return e
+    
+def doprintiln(): 
+    getok() 
+    e = expr()
+    out('printintlnmacro {}'.format(varloc(e)))
+    return e
+
+def doprintchar():  
+    getok()  
+    e = expr()  
+    out('printcharmacro {}'.format(varloc(e)))
+    return e
+    
+def donot():
+    getok()
+    if toptok() == '[':
+        getok()
+        e = getreg()
+        match(']')
+        val = expr()
+        out('mov {}, {}'.format(varloc(e), varloc(val)))
+    else : e = getreg()
+    out('not {}'.format(varloc(e)))
+    return e
+    
+def dosqrt():
+    getok()
+    if toptok() == '[':
+        getok()
+        e = getreg()
+        match(']')
+        val = expr()
+        out('mov {}, {}'.format(varloc(e), varloc(val)))
+    else : e = getreg()
+    out('sqrtmacro {}'.format(varloc(e)))
+    return e
+
+def doglobalassign():
+    getok()
+    if toptok() in globalvars.keys():
+        glo = getok()
+        reg = expr()
+        rega = varloc(reg)
+        regb = regs[0]
+        if regb == rega : regb = regs[1]
+        out('push {}'.format(regb))
+        out('mov {}, {}'.format(regb, globalvars[glo]))
+        out('mov qword [{}], {}'.format(regb, rega))
+        out('pop {}'.format(regb))
+        return reg
+    else:
+        reg = getreg()
+        glo = getok()
+        if glo in globalvars.keys():
+            vreg = varloc(reg)
+            out('mov {}, {}'.format(vreg, globalvars[glo]))
+            out('mov {}, qword [{}]'.format(vreg, vreg))
+            return reg
+        elif glo in globalarrays.keys():
+            out('mov {}, {}'.format(varloc(reg), globalarrays[glo]))
+            return reg
+        else:
+            err("no such global '{}'".format(glo))
+    
+def doglobals():
+    global dataoutput
+    global globalvars
+    global globalarrays
+    
+    def dataout(s):
+        global dataoutput
+        dataoutput += s + '\n'
+    
+    while toptok() != '\n':
+        name = getid()
+        if name in globalvars.keys() or name in globalarrays.keys():
+            print(globalvars, globalarrays)
+            err("duplicate global '{}'".format(name))
+        nname = newname(name)
+        if toptok() == '[':
+            globalarrays[name] = nname
+            getok()
+            tmap = {
+                1 : 'db',
+                2 : 'dw',
+                4 : 'dd',
+                8 : 'dq',
+            }
+            size = int(getint())
+            if not size in tmap:
+                err('bad size for mem allocation')
+            args = []
+            while toptok() != ']':
+                if toptok()[0] == '"':
+                    args.append(getok())
+                else:
+                    args.append(expr())
+            getok()
+            s = "{} {} ".format(nname, tmap[size])
+            if len(args) == 0 : err("nothing allocated")
+            for a in args:
+                if a[0] == '"':
+                    for c in a[1:-1]:
+                        s += '{}, '.format(ord(c))
+                else:
+                    s += '{}, '.format(a)
+            s = s[:-2]
+            dataout(s)
+        else:
+            globalvars[name] = nname
+            val = getint()
+            dataout('{} dq {}'.format(nname, val))
+
+def skipcurlyblock():
+    while toptok() != '}' : getok()
+    getok()
+    return None
+
 def expr():
     if toptok() in opmap.keys() : return doop()
-    elif toptok() in ['/', '%'] : return dodivop()
+    elif toptok() in ['/', '%', '%32'] : return dodivop()
     elif len(toptok()) > 1 and toptok()[0] == '%' : return getok()
     elif toptok()[0] == "'" : return getok()
     elif toptok() == '?' : return doif()
     elif toptok()[0] == '@' : return dolib()
     elif toptok() == '!:' : return doassign()
     elif toptok() == '!!' : return doindex()
-    elif toptok() == '$' : return doasm()
+    elif toptok() == ';;' : return doglobalassign()
+    elif toptok()[0] == '$' : return doasm()
     elif toptok() == '\\' : return dofp()
     elif toptok() == '\\>' : return dodfp()
     #elif toptok() == '\\<' : return doanonfunc()
     elif toptok() == '>>=' : return domonad()
     elif toptok() == '>|' : return dopush()
     elif toptok() == '<|' : return dopop()
+    elif toptok() == '!' : return donot()
+    elif toptok() == '^/' : return dosqrt()
     elif toptok() == '_i' : return doprinti()
+    elif toptok() == '_il' : return doprintiln()
+    elif toptok() == '_s' : return doprintstr()
+    elif toptok() == '_sl' : return doprintstrln()
+    elif toptok() == '_c' : return doprintchar()
     elif toptok() == '@noret' : return getok()
+    elif toptok() == '{' : return skipcurlyblock()
     elif toptok() in funcs.keys() : return docall()
     elif isalnum(toptok()) or isint(toptok()) : return getok()
     elif toptok() == '(':
@@ -719,8 +945,10 @@ def startfunc():
         if len(rs) == 0 : tmvars()
         reg = rs.pop()
         localvars[name] = reg
-        val = getint()
-        out('mov {}, {}'.format(reg, val))
+        if toptok() == '_' : getok()
+        else:
+            val = getint()
+            out('mov {}, {}'.format(reg, val))
     getok()
     last = None
     while toptok() != '\n' : last = expr()
@@ -738,9 +966,10 @@ def dobitmode():
 def domode():
     s = getok()[1:]
     if s == 'bitmode' : dobitmode()
+    if s == 'g' : doglobals()
             
 def startline():
-    if toptok() == '$' : doasm()
+    if toptok()[0] == '$' : doasm()
     elif toptok()[0] == '@' : domode()
     else : startfunc()
     
@@ -750,9 +979,9 @@ def findfuncs():
     oldtokens = tokens[:]
     while toptok() == '\n' : getok()
     while len(tokens) > 1:
-        if toptok() == '$':
+        if toptok()[0] == '$':
             getok()
-            getok()
+            #getok()
         elif toptok()[0] == '@':
             t = getok()
             while t != '\n' : t = getok()
@@ -766,7 +995,8 @@ def findfuncs():
             getok()
             while toptok() != ':':
                 name = getid()
-                val = getint()
+                #val = getint()
+                getok()
                 locals.append(name)
             getok()
             #if isint(toptok()) : args.pop()
@@ -775,24 +1005,229 @@ def findfuncs():
         while toptok() == '\n' and len(tokens) > 1 : getok()
     tokens = oldtokens
     ln = 1
+    
+def doconstexpr(toks):
+    global tokens
+    tokens = toks
+    getok = getokraw
+    def cexpr():
+        opmap = {
+            '+' : lambda a, b : a + b,
+            '-' : lambda a, b : a - b,
+            '*' : lambda a, b : a * b,
+            '/' : lambda a, b : a / b,
+            '**' : lambda a, b : int(a ** b),
+            '<<' : lambda a, b : int(a * 2 ** b),
+            '>>' : lambda a, b : int(a / 2 ** b)
+        }
+        mopmap = {
+            '^/' : lambda a : int(a ** (0.5))
+        }
+        t = toptok()
+        if t in opmap.keys():
+            getok()
+            a = cexpr()
+            b = cexpr()
+            return opmap[t](a, b)
+        elif t in mopmap.keys():
+            getok()
+            a  =cexpr()
+            return mopmap[t](a)
+        else : return int(getint())
+        
+    ntoks = []
+    while len(tokens) > 1:
+        t = getok()
+        if t == '@c' : ntoks.append(str(cexpr()))
+        else : ntoks.append(t)
+    ntoks.append('\n')
+    return ntoks[::-1]
 
-def start(prog):
+class macro:
+    def __init__(self, args, tokens):
+        self.args = args
+        self.tokens = tokens
+
+def findmacros(toks):
+    global tokens
+    global ln
+    getok = getokraw
+    macros = {}
+    tokens = toks
+    ntoks = []
+    while toptok() == '\n' : getok()
+    while len(tokens) > 1:
+        if toptok()[0] == '$':
+            ntoks.append(getok())
+            #ntoks.append(getok())
+        elif toptok()[0] == '@':
+            t = getok()
+            ntoks.append(t)
+            while t != '\n':
+                t = getok()
+                ntoks.append(t)
+        else:
+            fname = getok()
+            args = []
+            locals = []
+            while toptok() != '=' and toptok() != '~':
+                #name = getid()
+                name = getok()
+                args.append(name)
+            if toptok() == '~':
+                getok()
+                mtokens = []
+                while toptok() != '\n':
+                    mt = getok()
+                    if mt[0] != '\n' : mtokens.append(mt)
+                    else : ntoks.append(mt)
+                #mtokens = [t for t in mtokens if t[0] != '\n' or len(t) == 1]
+                macros[fname] = macro(args, mtokens)
+            else:
+                ntoks.append(fname)
+                for a in args : ntoks.append(a)
+                while toptok() != '\n' : ntoks.append(getok())
+        while toptok() == '\n' and len(tokens) > 1 : ntoks.append(getok()) 
+    return ntoks, macros
+
+def common_member(a, b): 
+    a_set = set(a) 
+    b_set = set(b) 
+    if (a_set & b_set): 
+        return True 
+    else: 
+        return False
+
+def dorepeatmacros(toks):
+    global tokens
+    getok = getokraw
+    tokens = toks
+    ntoks = []
+    while len(tokens) > 1:
+        t = getok()
+        if t == '*~':
+            m = getok()
+            if m == '(':
+                depth = 0
+                t = getok()
+                expand = []
+                while depth > 0 or t != ')':
+                    expand.append(t)
+                    if t == '(' : depth += 1
+                    elif t == ')' : depth -= 1
+                    t = getok()
+            else : expand = [m]
+            length = getint()
+            expand *= int(length)
+            for e in expand : ntoks.append(e)
+        else : ntoks.append(t)
+    ntoks.append('\n')
+    return ntoks[::-1]
+
+def execrepeatmacros(toks):
+    global tokens
+    tokens = toks
+    oldtokens = tokens[:]
+    for i in range(30):
+        ntoks = dorepeatmacros(tokens)
+        tokens = ntoks
+        if tokens == oldtokens : break
+        oldtokens = tokens[:]
+    return tokens
+
+def domacros(prog):
+    global tokens
+    tokens = ['\n'] + tokenize(prog)
+    #tokens, macros = findmacros(tokens)
+    #tokens = domacroreplace(tokens, macros)
+    
+    #print(tokens)
+    tokens, macros = findmacros(tokens)
+    for i in range(30):
+        tokens = domacroreplace(tokens, macros)
+        if not common_member(tokens, macros.keys()) : break        
+    #print(tokens)
+    if common_member(tokens, macros.keys()):
+        culprit = None
+        for m in macros.keys():
+            if m in tokens:
+                culprit = m
+                break
+        global ln
+        ln = 0
+        err("macro '{}' recursion overflow".format(culprit))
+    #print(tokens)
+    tokens = ['\n'] + tokens[::-1]
+    tokens = execrepeatmacros(tokens)
+    tokens = doconstexpr(tokens)
+    return tokens
+    
+def domacroreplace(toks, macros):
+    global tokens
+    getok = getokraw
+    tokens = toks[::-1]
+    ntoks = []
+    while len(tokens) > 1:
+        t = getok()
+        if t in macros.keys():
+            m = macros[t]
+            argmap = {}
+            for a in m.args:
+                v = getok()
+                if v == '(':
+                    depth = 0
+                    l = []
+                    t = getok()
+                    while depth > 0 or t != ')':
+                        if t == '(' : depth += 1
+                        elif t == ')' : depth -= 1
+                        l.append(t)
+                        t = getok()
+                    argmap[a] = l
+                else : argmap[a] = [v]
+            for tok in m.tokens:
+                if tok in argmap.keys():
+                    ntoks += argmap[tok]
+                else : ntoks.append(tok)
+        else : ntoks.append(t)
+    return ntoks + ['\n']
+
+class compileresult:
+    def __init__(self):
+        self.output = None
+        self.dataoutput = None
+        self.funcs = None
+
+def start(prog, noasm=False):
     global tokens
     global localvars
     global output
     global stk
+    global ln
+    global globalvars
+    global globalarrays
     output = ''
     localvars = {}
     stk = []
-    tokens = tokenize(prog)
-    #print(tokens)
+    globalvars = {}
+    globalarrays = {}
+    tokens = domacros(prog)
+    #tokens = tokenize(prog)
+    print(' '.join(tokens[::-1]))
+    ln = 0
     findfuncs()
-    while len(tokens) > 1 and toptok() == '\n' : getok()
-    while len(tokens) > 1:
-        startline()
-        match('\n')
+    ln = 0
+    result = compileresult()
+    if not noasm:
         while len(tokens) > 1 and toptok() == '\n' : getok()
-    return output
+        while len(tokens) > 1:
+            startline()
+            match('\n')
+            while len(tokens) > 1 and toptok() == '\n' : getok()
+        result.dataoutput = dataoutput
+        result.output = output
+    result.funcs = funcs
+    return result
     
 def genids(max):
     
@@ -843,7 +1278,9 @@ def main():
         sys.exit(0)
     prog = open(sys.argv[1]).read()
        
-    output = start(prog)
+    cresult = start(prog)
+    dataoutput = cresult.dataoutput
+    output = cresult.output
 
     comp = compress(prog)
 
@@ -855,7 +1292,7 @@ def main():
     ol = len(output)
     print("""
     program length: {} chars, {} lines
-    assembly length: {}, chars, {} lines
+    assembly length: {} chars, {} lines
     ratio: {}%
     """.format(pl, len(prog.split('\n')), ol, len(output.split('\n')), int(float(pl) / float(ol) * 100)))
 
