@@ -410,7 +410,8 @@ def docall():
 
 def docallwithargs(fname, arge):
     vars = list(localvars.keys())
-    if len(arge) > 1 and arge.count(retvar) > 0:
+    #if len(arge) > 1 and arge.count(retvar) > 0:
+    if arge.count(retvar) > 1:
         err("expression in function call arguments not saved to register")
     for v in vars:
         push(v)
@@ -560,7 +561,23 @@ def doassign():
     if not times in tmap.keys() : err("bad memory size '{}'".format(times))
     e = expr()
     try:
-        out('mov {} [{} + {} * {} + {}], {}'.format(tmap[times], varloc(v), varloc(i), times, off, varloc(e)))
+        push(varbyreg('rax'))
+        push(varbyreg('rbx'))
+        push(varbyreg('rcx'))
+        out('mov rax, {}'.format(varloc(e)))
+        out('mov rbx, {}'.format(varloc(v)))
+        out('mov rcx, {}'.format(varloc(i)))
+        if times == 8 : r = 'rax'
+        elif times == 4 : r = 'eax'
+        elif times == 1 : r = 'al'
+        elif times == 2:
+            out('shl rax, 16')
+            r = 'ax'
+        out('mov {} [rbx + rcx * {} + {}], {}'.format(tmap[times], times, off, r))
+        out('pop rcx')
+        out('pop rbx')
+        out('pop rax')
+        for i in range(3) : stk.pop()
     except : err('array assignment error')
     return e
     
@@ -755,7 +772,7 @@ def doprintstrln():
     
 def doprintiln(): 
     getok() 
-    e = expr() 
+    e = expr()
     out('printintlnmacro {}'.format(varloc(e)))
     return e
 
@@ -865,6 +882,11 @@ def doglobals():
             val = getint()
             dataout('{} dq {}'.format(nname, val))
 
+def skipcurlyblock():
+    while toptok() != '}' : getok()
+    getok()
+    return None
+
 def expr():
     if toptok() in opmap.keys() : return doop()
     elif toptok() in ['/', '%', '%32'] : return dodivop()
@@ -890,6 +912,7 @@ def expr():
     elif toptok() == '_sl' : return doprintstrln()
     elif toptok() == '_c' : return doprintchar()
     elif toptok() == '@noret' : return getok()
+    elif toptok() == '{' : return skipcurlyblock()
     elif toptok() in funcs.keys() : return docall()
     elif isalnum(toptok()) or isint(toptok()) : return getok()
     elif toptok() == '(':
@@ -986,6 +1009,7 @@ def findfuncs():
 def doconstexpr(toks):
     global tokens
     tokens = toks
+    getok = getokraw
     def cexpr():
         opmap = {
             '+' : lambda a, b : a + b,
@@ -1047,18 +1071,23 @@ def findmacros(toks):
             args = []
             locals = []
             while toptok() != '=' and toptok() != '~':
-                name = getid()
+                #name = getid()
+                name = getok()
                 args.append(name)
             if toptok() == '~':
                 getok()
                 mtokens = []
-                while toptok() != '\n' : mtokens.append(getok())
+                while toptok() != '\n':
+                    mt = getok()
+                    if mt[0] != '\n' : mtokens.append(mt)
+                    else : ntoks.append(mt)
+                #mtokens = [t for t in mtokens if t[0] != '\n' or len(t) == 1]
                 macros[fname] = macro(args, mtokens)
             else:
                 ntoks.append(fname)
                 for a in args : ntoks.append(a)
                 while toptok() != '\n' : ntoks.append(getok())
-        while toptok() == '\n' and len(tokens) > 1 : ntoks.append(getok())    
+        while toptok() == '\n' and len(tokens) > 1 : ntoks.append(getok()) 
     return ntoks, macros
 
 def common_member(a, b): 
@@ -1184,9 +1213,10 @@ def start(prog, noasm=False):
     globalarrays = {}
     tokens = domacros(prog)
     #tokens = tokenize(prog)
-    #print(tokens)
+    print(' '.join(tokens[::-1]))
     ln = 0
     findfuncs()
+    ln = 0
     result = compileresult()
     if not noasm:
         while len(tokens) > 1 and toptok() == '\n' : getok()
