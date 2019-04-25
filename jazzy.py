@@ -22,7 +22,7 @@ class function:
 def tokenize(s):
     s = re.sub(r'#.*\n', '\n', s)
     mcs = r';;|\*\*|\^/|%32|\*~|>\||<\||>>=|\\<|\.\.\.|\\>|::|<<|>>|!!|!:|==|!=|<=|>='
-    r = mcs + r'|\$\$|`[a-zA-Z0-9_]+|\'[^\']\'|"[^"]*"|\$ *\{[^\}]*}|\$[^\n]*|[@`]?[_a-zA-Z]+|\-?[0-9]+|%[_a-zA-Z0-9]+|\n[^\S\n]*|\S'
+    r = mcs + r'|\+~|i~|%>|\$\$|`[a-zA-Z0-9_]+|\'[^\']\'|"[^"]*"|\$ *\{[^\}]*}|\$[^\n]*|[@`]?[_a-zA-Z]+|\-?[0-9]+|%[_a-zA-Z0-9]+|\n[^\S\n]*|\S'
     result = ['\n'] + re.findall(r, s)[::-1]
     result = [s if s[0] != '`' else s[1:] for s in result]
     return result    
@@ -940,6 +940,12 @@ def doglobals():
             val = getint()
             dataout('{} dq {}'.format(nname, val))
 
+def doregnum():
+    getok()
+    n = getint()
+    try : return '%' + allregs[int(n)]
+    except : err("no register in range {}".format(n))
+
 def skipcurlyblock():
     while toptok() != '}' : getok()
     getok()
@@ -948,6 +954,7 @@ def skipcurlyblock():
 def expr():
     if toptok() in opmap.keys() : return doop()
     elif toptok() in ['/', '%', '%32'] : return dodivop()
+    elif toptok() == '%>' : return doregnum()
     elif len(toptok()) > 1 and toptok()[0] == '%' : return getok()
     elif toptok()[0] == "'" : return getok()
     elif toptok() == '?' : return doif()
@@ -1063,34 +1070,39 @@ def findfuncs():
     tokens = oldtokens
     ln = 1
     
+
+def cexpr():
+    opmap = {
+        '+' : lambda a, b : a + b,
+        '-' : lambda a, b : a - b,
+        '*' : lambda a, b : a * b,
+        '/' : lambda a, b : a / b,
+        '**' : lambda a, b : int(a ** b),
+        '<<' : lambda a, b : int(a * 2 ** b),
+        '>>' : lambda a, b : int(a / 2 ** b)
+    }
+    mopmap = {
+        '^/' : lambda a : int(a ** (0.5))
+    }
+    t = toptok()
+    if t == '@c':
+        getok()
+        return cexpr()
+    elif t in opmap.keys():
+        getok()
+        a = cexpr()
+        b = cexpr()
+        return opmap[t](a, b)
+    elif t in mopmap.keys():
+        getok()
+        a = cexpr()
+        return mopmap[t](a)
+    else : return int(getint())
+
 def doconstexpr(toks):
     global tokens
     tokens = toks
     getok = getokraw
-    def cexpr():
-        opmap = {
-            '+' : lambda a, b : a + b,
-            '-' : lambda a, b : a - b,
-            '*' : lambda a, b : a * b,
-            '/' : lambda a, b : a / b,
-            '**' : lambda a, b : int(a ** b),
-            '<<' : lambda a, b : int(a * 2 ** b),
-            '>>' : lambda a, b : int(a / 2 ** b)
-        }
-        mopmap = {
-            '^/' : lambda a : int(a ** (0.5))
-        }
-        t = toptok()
-        if t in opmap.keys():
-            getok()
-            a = cexpr()
-            b = cexpr()
-            return opmap[t](a, b)
-        elif t in mopmap.keys():
-            getok()
-            a  =cexpr()
-            return mopmap[t](a)
-        else : return int(getint())
         
     ntoks = []
     while len(tokens) > 1:
@@ -1178,9 +1190,11 @@ def dorepeatmacros(toks):
                     elif t == ')' : depth -= 1
                     t = getok()
             else : expand = [m]
-            length = getint()
-            expand *= int(length)
-            for e in expand : ntoks.append(e)
+            length = cexpr()
+            for i in range(int(length)):
+                for e in expand:
+                    if e == 'i~' : ntoks.append(str(i))
+                    else : ntoks.append(e)
         else : ntoks.append(t)
     ntoks.append('\n')
     return ntoks[::-1]
@@ -1195,6 +1209,19 @@ def execrepeatmacros(toks):
         if tokens == oldtokens : break
         oldtokens = tokens[:]
     return tokens
+    
+def doaddmacros(toks):
+    toks = toks[::-1]
+    ntoks = []
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t == '+~':
+            i += 1
+            ntoks.append(ntoks.pop() + toks[i])
+        else : ntoks.append(t)
+        i += 1
+    return ntoks[::-1]
 
 def domacros(prog):
     global tokens
@@ -1221,6 +1248,7 @@ def domacros(prog):
     tokens = ['\n'] + tokens[::-1]
     tokens = execrepeatmacros(tokens)
     tokens = doconstexpr(tokens)
+    tokens = doaddmacros(tokens)
     return tokens
     
 def domacroreplace(toks, macros):
@@ -1354,11 +1382,18 @@ def main():
     dataoutput = cresult.dataoutput
     output = cresult.output
 
-    comp = compress(prog)
+    #comp = compress(prog)
 
+    mtokens = domacros(prog)
+    mprog = ' '.join(mtokens[::-1]).strip()
+
+    print('Source:')
     print(prog + '\n')
     #print('Compressed:')
     #print(comp + '\n')
+    print('Macro Expansion:')
+    print(mprog)
+    print('Assembly:')
     print(output)
     pl = len(prog)
     ol = len(output)
