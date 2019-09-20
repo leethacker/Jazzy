@@ -13,6 +13,7 @@ stk = []
 globalvars = {}
 globalarrays = {}
 globalbuffers = {}
+patternmatches = {}
 
 funcs = {}
 class function:
@@ -145,14 +146,14 @@ def getreg():
     if not s in localvars.keys() and not s == retvar : expect('var', s)
     return s
 
-def varloc(s):
+def varloc(s, nostk=False):
     if s == None : err('not a valid value')
     if s[0] == "'" : return ord(s[1:-1])
     elif len(s) > 1 and s[0] == '%':
         r = s[1:]
         if not r in completereglist : err("no such register ''".format(r))
         return r
-    elif s in stk : return 'qword [rsp + {}]'.format(stk[::-1].index(s) * 8)
+    elif s in stk and not nostk: return 'qword [rsp + {}]'.format(stk[::-1].index(s) * 8)
     elif s in localvars.keys() : return localvars[s]
     elif isint(s) : return s
     elif s == '@retvar' : return retreg
@@ -275,7 +276,7 @@ def doop():
         var = getreg()#getvar()
         match(']')
         src = expr()
-        if toptok() != '[' and op in ['+'] or op in ['*'] and (isint(src) or isint(toptok())) or op in ['-'] and isint(toptok()):
+        if toptok() != '[' and (op in ['+', '*'] and (isint(src) or isint(toptok())) or op in ['-'] and isint(toptok())):
             val = expr()
             if isint(src) and isint(val) : out('mov {}, {} {} {}'.format(varloc(var), src, op, val))
             else : out('lea {}, [{} {} {}]'.format(varloc(var), varloc(src), op, varloc(val)))
@@ -291,6 +292,11 @@ def doop():
         getok()
     else:
         if op in ['<<', '>>'] : val = getint()
+        elif op in ['::', '='] and toptok() == '<|':
+            getok()
+            out('pop {}'.format(varloc(var)))
+            stk.pop()
+            return var
         else : val = expr()
         out('{} {}, {}'.format(opmap[op], varloc(var), varloc(val)))
     return var
@@ -512,17 +518,22 @@ def docall(dotarg=None):
     if func.isimported : fp = ''
     return docallwithargs('{}{}'.format(fp, fname), arge)
 
-def docallwithargs(fname, arge):
+def docallwithargs(fname, arge, usingretreg=False):
     vars = list(localvars.keys())
     #if len(arge) > 1 and arge.count(retvar) > 0:
-    if arge.count(retvar) > 1:
+    if arge.count(retvar) > (0 if usingretreg else 1):
         err("expression in function call arguments not saved to register")
     for v in vars:
         push(v)
+    rs = regs[::-1]
     for i in range(len(arge)):
         a = arge[i]        
         r = regs[i]
-        out('mov {}, {}'.format(r, varloc(a)))
+        loc = varloc(a, nostk=True)
+        if loc in rs: #throw in a "False and" if it misbehaves
+            if loc != r : out('mov {}, {}'.format(r, loc))
+        else : out('mov {}, {}'.format(r, varloc(a)))
+        rs.pop()
     out('call {}'.format(fname))
     for v in vars:
         out('mov {}, {}'.format(localvars[v], varloc(v)))
@@ -736,9 +747,11 @@ def doindex():
     else : i = expr()
     times = int(times)
     if not times in tmap.keys() : err("bad memory size '{}'".format(times))
-    #out('mov {}, 0'.format(retreg))
-    out('mov {}, [{} + {} * {} + {}]'.format(retreg, varloc(a), varloc(i), times, off))
-    if times < 8 : out('and {}, {}'.format(retreg, '0x' + 'ff' * times))
+    instr = 'mov'
+    if times < 8:
+        out('mov {}, {}'.format(retreg, '0x' + 'ff' * times))
+        instr = 'and'
+    out('{} {}, [{} + {} * {} + {}]'.format(instr, retreg, varloc(a), varloc(i), times, off))
     return retvar
 
 def doderef():
@@ -755,6 +768,7 @@ def doret():
     return None
 
 def doasm():
+    result = ''
     if toptok() == '$$':
         getok()
         s = ''
@@ -762,13 +776,28 @@ def doasm():
         while t != ';':
             s += t + ' '
             t = getok()
-        out(s)
     else:
         t = getok()
         t = t[1:]
         while t[0] == ' ' : t = t[1:]
         if t[0] == '{' : t = t[1:-1]
-        out(t)
+        s = t
+    varmode = False
+    var = ''
+    firstvar = None
+    for c in s:
+        if varmode:
+            if isalnum(c) : var += c
+            else:
+                if not firstvar : firstvar = var
+                result += varloc(var)
+                result += c
+                varmode = False
+                var = ''
+        elif c == '\\' : varmode = True
+        else : result += c
+    out(result)
+    return firstvar
     
 def dofp():
     getok()
@@ -794,7 +823,7 @@ def dodfp():
             args.append(expr())
         getok()
     out('pop {}'.format(retreg))
-    return docallwithargs(retreg, args)
+    return docallwithargs(retreg, args, usingretreg=True)
     
 def doanonfunc():
     global localvars
@@ -823,13 +852,15 @@ def doanonfunc():
         if len(rs) == 0 : tmvars()
         reg = rs.pop()
         localvars[name] = reg
-        val = getint()
-        out('mov {}, {}'.format(reg, val))
+        if toptok() == '_' : getok()
+        else:
+            val = getint()
+            out('mov {}, {}'.format(reg, val))
     getok()
     while toptok() != ')' : last = expr()
     getok()
     if last == None : err("must return value at end of function")
-    if last != '@retvar' : out('mov {}, {}'.format(retreg, varloc(last)))
+    if varloc(last) != retreg : out('mov {}, {}'.format(retreg, varloc(last)))
     if len(stk) > 0 : out('add rsp, {}'.format(len(stk) * 8))
     out('ret')
     outlabel(skip)
@@ -1060,7 +1091,17 @@ def doglobals():
 def dorawstr():
     s = getok()
     name = newname('rawstr')
-    ds = ', '.join([str(ord(c)) for c in s[1:-1]])
+    escape = False
+    vals = []
+    escmap = {'n' : 10, 't' : 9, '0' : 0}
+    for c in s[1:-1]:
+        if escape:
+            if c in escmap : vals.append(str(escmap[c]))
+            else : vals.append(str(ord(c)))
+            escape = False
+        elif c == '\\' : escape = True
+        else : vals.append(str(ord(c)))
+    ds = ', '.join(vals)
     if s[1:-1] : dataout('{} db {}, 0'.format(name, ds))    
     else : dataout('{} db 0'.format(name))
     out('mov {}, {}'.format(retreg, name))
@@ -1090,7 +1131,7 @@ def dotcheck(val):
         getok()
         if not toptok() in funcs.keys() : err("no func '{}'".format(toptok()))
         return dotcheck(docall(dotarg=val))
-    else : return val
+    else : return val#err("malformed expression '{}'".format(val)) #return val
 
 def expr():
     if toptok() in opmap.keys() : return doop()
@@ -1123,7 +1164,7 @@ def expr():
     elif toptok() == '{' : return skipcurlyblock()
     elif toptok() in localvars.keys() : return dotcheck(getok())
     elif toptok() in funcs.keys() : return dotcheck(docall())
-    elif isalnum(toptok()) or isint(toptok()) : return dotcheck(getok())
+    elif isint(toptok()) : return dotcheck(getok())
     elif toptok() == '(':
         last = None
         getok()
@@ -1146,20 +1187,65 @@ def startfunc():
         if funcpref != "" : outlabel(toptok())
         #outlabel('_{}'.format(toptok()))
     funcname = getid()
-    outlabel('{}{}'.format(funcpref, funcname))
     localvars = {}
     rs = regs[::-1]
     args = []
     tmvars = lambda : err("too many arguments/variables")
+    ispattern = False
+    patternargs = []
     while toptok() != '=':
-        name = getid()
+        if toptok() == '[' : name = getok()
+        elif isint(toptok()) : name = getint()
+        else : name = getid()
         if len(rs) == 0 : tmvars()
         reg = rs.pop()
-        localvars[name] = reg
-        args.append(name)
-    if funcname in ['main', '_main']:
+        if name == '[':
+            ispattern = True
+            pat = '['
+            while toptok() != ']' : pat += (getint() if toptok() != '_' else getok()) + ' '
+            getok()
+            pat = list(pat)
+            pat[-1] = ']'
+            pat = ''.join(pat)
+            patternargs.append(pat)
+        elif isint(name):
+            ispattern = True
+            patternargs.append(name)
+        else:
+            localvars[name] = reg
+            args.append(name)
+            patternargs.append(None)
+    genpatternlabel = lambda funcpref, funcname, patternargs : \
+        "{}{}_@pattern_{}".format(funcpref, funcname, '_'.join([str(i) for i in patternargs]).replace('[', '@').replace(']', '@').replace(' ', '_'))
+    if ispattern : outlabel(genpatternlabel(funcpref, funcname, patternargs))
+    else : outlabel('{}{}'.format(funcpref, funcname))
+    if False and funcname in ['main', '_main']:
         if len(args) >= 1 : out('mov rax, rdi')
         if len(args) >= 2 : out('mov rbx, rsi')
+    if not ispattern and funcname in patternmatches:
+        patterns = patternmatches[funcname]
+        for p in patterns:
+            rp = regs[::-1]
+            skip = newname('skip')
+            for n in p:
+                r = rp.pop()
+                if n != None:
+                    if isint(n):
+                        out('cmp {}, {}'.format(r, n))            
+                        out('jne {}'.format(skip))
+                    else:
+                        n = n[1:-1].split(' ')[::-1]
+                        memsize = toint(n.pop())
+                        n = n[::-1]
+                        for i in range(len(n)):
+                            num = n[i]
+                            if num != '_':
+                                out('mov {}, [{} + {}]'.format(retreg, r, i * memsize))
+                                if memsize < 8 : out('and {}, {}'.format(retreg, '0x' + 'ff' * memsize))
+                                out('cmp {}, {}'.format(retreg, num))            
+                                out('jne {}'.format(skip))
+            out("jmp {}".format(genpatternlabel(funcpref, funcname, p)))
+            outlabel(skip)
     getok()
     while toptok() != ':':
         name = getid()
@@ -1196,6 +1282,8 @@ def domode():
     elif s == 'g' : doglobals()
     elif s == 'fpref' : dofpref()
     elif s == 'callconv' : setcallconv(getok())
+
+def ismode(s) : return s[1:] in ['bitmode', 'g', 'fpref', 'callconv']
             
 def startline():
     if toptok()[0] == '$' : doasm()
@@ -1211,6 +1299,7 @@ def findfuncs(infindpublics=False):
     global tokens
     global ln
     oldtokens = tokens[:]
+    importedbasics = True
     while toptok() == '\n' : getok()
     while len(tokens) > 1:
         if toptok()[0] == '$':
@@ -1222,22 +1311,25 @@ def findfuncs(infindpublics=False):
                 dofpref()
             else : t = getok()
             while toptok() != '\n' : t = getok()
-        elif toptok() == '<' and not infindpublics:
+        elif not importedbasics or toptok() == '<' and not infindpublics:
             nofunc = False
-            getok()
-            fname = getid()
+            if importedbasics:
+                getok()
+                fname = getid()
             if isint(toptok()):
                 argnum = int(getint())
                 args = ['arg{}'.format(i) for i in range(argnum)]
-            elif toptok() == '.':
-                getok()
-                match('jz')
-                filename = fname + '.jz'
-                try : txt = open(filename).read()
-                except:
-                    try : txt = open('./standardlib/'+filename).read()
-                    except : err("couldn't import file '{}'".format(filename))
-                importfuncs = getpublics(txt)
+            elif not importedbasics or toptok() == '.':
+                if importedbasics:
+                    getok()
+                    match('jz')
+                    filename = fname + '.jz'
+                    try : txt = open(filename).read()
+                    except:
+                        try : txt = open('./standardlib/'+filename).read()
+                        except : err("couldn't import file '{}'".format(filename))
+                    importfuncs = getpublics(txt)
+                else : importfuncs = getpublics(open('./standardlib/basic.jz').read())
                 for fname in importfuncs.keys():
                     f = importfuncs[fname]
                     f.isimported = True
@@ -1247,6 +1339,7 @@ def findfuncs(infindpublics=False):
                     funcs[fname] = f
                 #print(importfuncs)
                 nofunc = True
+                importedbasics = True
             else:
                 args = []
                 while toptok() != '\n':
@@ -1261,6 +1354,8 @@ def findfuncs(infindpublics=False):
             t = getok()
             while toptok() != '}' : t = getok()
         else:
+            isargmatch = False
+            argpattern = []
             if toptok() == '>':
                 ispublic = True
                 getok()
@@ -1269,17 +1364,33 @@ def findfuncs(infindpublics=False):
             args = []
             locals = []
             while toptok() != '=':
-                name = getid()
+                if toptok() == '[' : name = getok()
+                elif not isint(toptok()) : name = getid()
+                else : name = getint()
+                if isint(name):
+                    isargmatch = True
+                    argpattern.append(name)
+                elif name == '[':
+                    isargmatch = True
+                    pat = '['
+                    while toptok() != ']' : pat += (getint() if toptok() != '_' else getok()) + ' '
+                    getok()
+                    pat = list(pat)
+                    pat[-1] = ']' 
+                    pat = ''.join(pat)                   
+                    argpattern.append(pat)
+                else : argpattern.append(None)
                 args.append(name)
             getok()
             while toptok() != ':':
                 name = getid()
-                #val = getint()
                 getok()
                 locals.append(name)
             getok()
-            #if isint(toptok()) : args.pop()
-            funcs[fname] = function(fname, args, ispublic)
+            if isargmatch:
+                if not fname in patternmatches : patternmatches[fname] = []
+                patternmatches[fname].append(argpattern)
+            else : funcs[fname] = function(fname, args, ispublic)
         while toptok() != '\n' : getok()
         while toptok() == '\n' and len(tokens) > 1 : getok()
     tokens = oldtokens
@@ -1331,11 +1442,22 @@ class macro:
         self.args = args
         self.tokens = tokens
 
+globalmacros = {}
+
+def getglobalmacros():
+    global tokens
+    oldtokens = tokens
+    tokens = tokenize(open('./standardlib/macros.jzm').read() + '\n')
+    t, macros = findmacros(tokens)
+    for m in macros:
+        globalmacros[m] = macros[m]
+    tokens = oldtokens
+
 def findmacros(toks):
     global tokens
     global ln
     getok = getokraw
-    macros = {}
+    macros = globalmacros.copy()
     tokens = toks
     ntoks = []
     while toptok() == '\n' : getok()
@@ -1343,7 +1465,7 @@ def findmacros(toks):
         if toptok()[0] == '$':
             ntoks.append(getok())
             #ntoks.append(getok())
-        elif toptok()[0] == '@' or toptok() in ['<', '>']:
+        elif toptok()[0] == '@' and ismode(toptok()) or toptok() in ['<', '>']:
             t = getok()
             ntoks.append(t)
             while t != '\n':
@@ -1455,6 +1577,7 @@ def domacros(prog):
     #tokens = domacroreplace(tokens, macros)
     
     #print(tokens)
+    getglobalmacros()
     tokens, macros = findmacros(tokens)
     for i in range(30):
         tokens = domacroreplace(tokens, macros)
@@ -1577,6 +1700,7 @@ def start(prog, noasm=False, dojzalloc=False):
     global globalvars
     global globalarrays
     global globalbuffers
+    global patternmatches
     global jzalloc
     jzalloc = dojzalloc
     output = ''
@@ -1586,6 +1710,7 @@ def start(prog, noasm=False, dojzalloc=False):
     globalvars = {}
     globalarrays = {}
     globalbuffers = {}
+    patternmatches = {}
     baseln = 0
     #tokens = tokenize(prog)
     baseln = 0
